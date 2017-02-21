@@ -46,7 +46,18 @@ def downloadToText(r,path):
                             text+=pytesseract.image_to_string(Image.open(page))
                         with open(loc[i][:-3]+'txt','w') as f:
                             f.write(text)
-    return ids,loc
+    return loc
+
+def getLocList(r,path):
+    ids = []
+    loc = []
+    num = len(r.json())
+    for i in range(num):
+        ids.append((r.json()[i]['Id'],r.json()[i]['LegislationNumber']))
+        url = 'http://lims.dccouncil.us/Download/'+str(ids[i][0])+'/'+ids[i][1]+'-SignedAct.pdf'
+        # store locations so we can reuse them when extracting text
+        loc.append(path+ids[i][1]+'-SignedAct.pdf')
+    return loc
 
 def search(loc,searchTerm):
     parSplit = re.compile('\n\n')
@@ -74,12 +85,26 @@ def search(loc,searchTerm):
 
 def saveSearchResults(results,path):
     # write to tsv so we don't get messed up by commas in original doc (are there tabs that mess us up?)
-    with open(path.parent.parent+'/searchResults.tsv','w') as outFile:
+    with open(path.parent+'searchResults.tsv','w') as outFile:
         keys = sorted(results.keys())
         outFile.write('Bill ID'+'\t'+'paragraphs where search term was found'+'\n')
         for key in keys:
             values = results[key]
             outFile.write(key+'\t'+'\t'.join(values)+'\n')
 
+def downloadAndSearch(criteria,path,r,searchTerm):
+    # download files, convert PDFs to text, create list of file locations
+    loc = downloadToText(r,path)
+    # search downloaded and converted files, pull paragraphs containing search term
+    results = search(loc,searchTerm)
+    # save search results to file
+    saveSearchResults(results,path)
 
+def searchOnly(r,searchTerm,path):
+    #create list of file locations
+    loc = getLocList(r,path)
+    # search downloaded and converted files, pull paragraphs containing search term
+    results = search(loc,searchTerm)
+    # save search results to file
+    saveSearchResults(results,path)
 

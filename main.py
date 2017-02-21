@@ -4,7 +4,6 @@ from LIMS_scraper.LIMS_scraper_util import *
 # try pdftotext first - if we can just pull text, no need to convert and run OCR
 # need to check if pdftotext file is empty
 
-'convert -density 300 -units PixelsPerInch -type Grayscale +compress input.png input.tif'
 #end goal: user inputs LIMS advanced search criteria for files to download and term to pull paragraphs based on - if files are already downloaded, skip to search step. 
 
 searchTerm = convertToRegex(input("What would you like to search for? "))
@@ -35,7 +34,7 @@ r = requests.post(base+'/api/v1/Legislation/AdvancedSearch',json=criteria)
 
 def main(criteria,path,r,searchTerm):
     # download files, convert PDFs to text, create list of file locations
-    ids, loc = downloadToText(r,path)
+    loc = downloadToText(r,path)
     # search downloaded and converted files, pull paragraphs containing search term
     results = search(loc,searchTerm)
     # save search results to file
