@@ -7,6 +7,7 @@ import os.path
 import pytesseract
 from PIL import Image
 import glob
+from PyPDF2 import PdfFileReader
 
 def convertToRegex(searchTerm):
     words = searchTerm.split(' ')
@@ -15,57 +16,79 @@ def convertToRegex(searchTerm):
         regExTerm +=word+'\s*'
     return re.compile(regExTerm)
 
+# This only downloads introductions - they are the only doc types with a URL in the search result json. 
+# Would need to iterate through all possible file names (bill #, doctype combinations) to get other kinds of docs
+#docTypes = CommitteeReport1,SignedAct,Introduction,Engrossment,Enrollment
 def downloadToText(r,path):
     ## To download files, convert PDF to text
-    ids = []
-    loc = []
-    num = len(r.json())
-    for i in range(num):
-        ids.append((r.json()[i]['Id'],r.json()[i]['LegislationNumber']))
-        url = 'http://lims.dccouncil.us/Download/'+str(ids[i][0])+'/'+ids[i][1]+'-SignedAct.pdf'
-        # store locations so we can reuse them when extracting text
-        loc.append(path+ids[i][1]+'-SignedAct.pdf')
-        if not os.path.isfile(loc[i]):
-            response = requests.get(url)
-            #if the file doesnt exist, the downloaded 'pdf' will be 531 bytes
-            if len(response.content)!=531:
-                with open(loc[i], 'wb') as f:
+    path1 = path+'text/'
+    path = path+'pdfs/'
+    locations = []
+    if not os.path.isdir(path):
+        os.mkdir(path)
+    if not os.path.isdir(path1):
+        os.mkdir(path1)
+    for bill in r.json(): 
+        # some 'bills' (e.g. public hearings) do not have documents associated w them
+        if bill['DocumentUrl']:
+            # documentUrl field only includes URL for introduction (not Signed Act or intermediate documents)
+            url = bill['DocumentUrl']
+            docs = '-'.join(url.split('-')[:-1])
+            # store locations so we can reuse them when extracting text
+            loc = path+url.split('/')[-1]
+            # location for pulled downloadToText
+            loc1 = path1+url.split('/')[-1]
+            locations.append(loc1)
+            # only download file if it doesnt exist yet
+            if not os.path.isfile(loc):
+                response = requests.get(url)
+                #if the file doesnt exist, the downloaded 'pdf' will be 531 bytes
+                with open(loc, 'wb') as f:
                     f.write(response.content)
                     # if file is already OCR'd, just use pdftotext to pull text
-                check_call(['pdftotext', '-enc', 'UTF-8','-layout' , loc[i]], stdout=PIPE)
-                with open(loc[i][:-3]+'txt','r') as f:
-                    # empty files (length 3 when read) are created when we call pdftotext on a non-OCR'd pdf
-                    if len(f.read())<10:
-                        # if file is not OCR'd (older PDFs and some angled scans), convert PDFs to png (smaller and higher qual than tiff and run tesseract OCR
-                        params = ['convert', '-density','300', '-units','PixelsPerInch', '-type','Grayscale', loc[i], loc[i][:-3]+'png']
-                        check_call(params)
-                        # converting to png outputs one file for each page, with -1,-2,...-n.png extensions - need a way to determine how many files are created
-                        pages = glob.glob(loc[i][:-4]+'-*')
-                        text = ''
-                        for page in pages:
-                            text+=pytesseract.image_to_string(Image.open(page))
-                        with open(loc[i][:-3]+'txt','w') as f:
-                            f.write(text)
-    return loc
+                    check_call(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
+                    with open(loc1[:-3]+'txt','r') as f:
+                        # small files (i've seen length up to 116 bytes when read) are created when we call pdftotext on a non-OCR'd pdf
+                        if len(f.read())<1000:
+                            # if file is not OCR'd (older PDFs and some angled scans), convert PDFs to png (smaller and higher qual than tiff and run tesseract OCR
+                            # specifying type grayscale breaks pytesseract for some images: 
+                            text = extractText(loc,path)
+                            with open(loc1[:-3]+'txt','w') as f:
+                                f.write(text)
+    return(locations)
 
-def getLocList(r,path):
-    ids = []
-    loc = []
-    num = len(r.json())
-    for i in range(num):
-        ids.append((r.json()[i]['Id'],r.json()[i]['LegislationNumber']))
-        url = 'http://lims.dccouncil.us/Download/'+str(ids[i][0])+'/'+ids[i][1]+'-SignedAct.pdf'
-        # store locations so we can reuse them when extracting text
-        loc.append(path+ids[i][1]+'-SignedAct.pdf')
-    return loc
+
+def convertGrayscale(imageLocation,i):
+    params = ['convert', '-density','300', '-units','PixelsPerInch', '-type','Grayscale', imageLocation+str([i]), imageLocation[:-4]+'-'+str([i])+'.png']
+    check_call(params)
+
+def convertColor(imageLocation,i):
+    params = ['convert', '-density','300', '-units','PixelsPerInch', imageLocation+str([i]), imageLocation[:-4]+'-'+str([i])+'.png']
+    check_call(params)
+
+def extractText(imageLocation,path):
+   # converting to png outputs one file for each page, with -1,-2,...-n.png extensions - need a way to determine how many files are created
+    text = ''
+    numPages = PdfFileReader(open(imageLocation,'rb')).getNumPages()
+    for i in range(numPages):
+        try:
+            convertGrayscale(imageLocation,i)
+            text+=pytesseract.image_to_string(Image.open(imageLocation[:-4]+'-'+str([i])+'.png'))
+        except:
+            convertColor(imageLocation,i)
+            text+=pytesseract.image_to_string(Image.open(imageLocation[:-4]+'-'+str([i])+'.png'))
+        # delete pngs after text extraction: they are pretty large
+    for file in glob.glob(os.path.join(path, '*-*.png')):
+        os.remove(file)
+    return(text)
 
 def search(loc,searchTerm):
     parSplit = re.compile('\n\n')
     paragraphs = {}
-    for i in range(len(loc)):
+    for file in loc:
         try:
-            with open(loc[i][:-3]+'txt') as file:
-                content = file.read()
+            with open(file[:-3]+'txt') as doc:
+                content = doc.read()
                 docParagraphs = []
                 for paragraph in re.split(parSplit,content):
                     if searchTerm.findall(paragraph):
@@ -78,19 +101,23 @@ def search(loc,searchTerm):
                         # strip tab chars (so they don't mess with tsv output)
                         paragraph = paragraph.replace('\t','')
                         docParagraphs.append(paragraph)
-                        paragraphs[loc[i][84:92]]=docParagraphs
+                        # maintain dict of dicts showing which paragraphs came from which document associated with the bill (e.g. introduction, signed act)
+                        paragraphs['-'.join(file.split('/')[-1].split('-')[:2])]={}
+                        paragraphs['-'.join(file.split('/')[-1].split('-')[:2])][str(file.split('/')[-1].split('-')[-1][:-4])]=docParagraphs
         except FileNotFoundError:
             pass
     return paragraphs
 
 def saveSearchResults(results,path):
     # write to tsv so we don't get messed up by commas in original doc (are there tabs that mess us up?)
-    with open(path.parent+'searchResults.tsv','w') as outFile:
+    with open(path+'searchResults.tsv','w') as outFile:
         keys = sorted(results.keys())
-        outFile.write('Bill ID'+'\t'+'paragraphs where search term was found'+'\n')
+        outFile.write('Bill ID'+'\t'+'Document Type'+'\t'+'paragraphs where search term was found'+'\n')
         for key in keys:
-            values = results[key]
-            outFile.write(key+'\t'+'\t'.join(values)+'\n')
+            docTypes = results[key].keys()
+            for docType in docTypes:
+                values = results[key][docType]
+                outFile.write(key+'\t'+docType+'\t'+'\t'.join(values)+'\n')
 
 def downloadAndSearch(criteria,path,r,searchTerm):
     # download files, convert PDFs to text, create list of file locations
@@ -100,11 +127,4 @@ def downloadAndSearch(criteria,path,r,searchTerm):
     # save search results to file
     saveSearchResults(results,path)
 
-def searchOnly(r,searchTerm,path):
-    #create list of file locations
-    loc = getLocList(r,path)
-    # search downloaded and converted files, pull paragraphs containing search term
-    results = search(loc,searchTerm)
-    # save search results to file
-    saveSearchResults(results,path)
 
