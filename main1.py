@@ -243,4 +243,8 @@ path = Path(input("Where would you like to save downloaded PDFs and extracted te
 r = requests.post(base+'/api/v1/Legislation/AdvancedSearch/1000',json=criteria)
 
 if __name__ == '__main__':
-    downloadAndSearch(criteria,path,r,searchTerm)  
+    docTypes = ['SignedAct','Engrossment','Enrollment']
+    for i in range(1,10):
+        for docType in ['CommitteeReport','HearingNotice','Amendment','HearingRecord']:
+            docTypes.append(docType+str(i))
+    downloadAndSearch(criteria,path,r,searchTerm,docTypes)  
