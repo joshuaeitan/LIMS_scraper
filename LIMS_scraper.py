@@ -31,7 +31,7 @@ def validate(dateText):
 
 # This only downloads introductions - they are the only doc types with a URL in the search result json. 
 # Would need to iterate through all possible file names (bill #, doctype combinations) to get other kinds of docs
-def downloadToText(r,path,docTypes):
+def downloadToText(r,path,docTypes,urlsToDownload=None):
     ## To download files, convert PDF to text
     path1 = path+'text/'
     path = path+'pdfs/'
@@ -40,14 +40,9 @@ def downloadToText(r,path,docTypes):
         os.mkdir(path)
     if not os.path.isdir(path1):
         os.mkdir(path1)
-    for bill in r.json(): 
-        # some 'bills' (e.g. public hearings) do not have documents associated w them
-        if bill['DocumentUrl']:
-            # documentUrl field only includes URL for introduction (not Signed Act or intermediate documents)
-            # is it safe to asume that if there is no Introduction there are no other documents?
-            url = bill['DocumentUrl']
-            urls = [bill['DocumentUrl']]
-            # what if not all docs are from same council period? need to iterate over at least next period..
+    if urlsToDownload:
+        for url in urlsToDownload:
+            urls = [url]
             for docType in docTypes:
                 urls.append('-'.join(url.split('-')[:-1])+'-'+docType+'.pdf')
             loc = path+url.split('/')[-1]
@@ -78,6 +73,45 @@ def downloadToText(r,path,docTypes):
                                     text = extractText(loc,path)
                                     with open(loc1[:-3]+'txt','w') as f:
                                         f.write(text)
+    else:
+        for bill in r.json(): 
+            # some 'bills' (e.g. public hearings) do not have documents associated w them
+            if bill['DocumentUrl']:
+                # documentUrl field only includes URL for introduction (not Signed Act or intermediate documents)
+                # is it safe to asume that if there is no Introduction there are no other documents?
+                url = bill['DocumentUrl']
+                urls = [bill['DocumentUrl']]
+                # what if not all docs are from same council period? need to iterate over at least next period..
+                for docType in docTypes:
+                    urls.append('-'.join(url.split('-')[:-1])+'-'+docType+'.pdf')
+                loc = path+url.split('/')[-1]
+                # check if introduction has been downloaded - if it has, don't test other doc types
+                #if not os.path.isfile(loc): - add this back in to final 
+                for url in urls:
+                    print(url)
+                    docs = '-'.join(url.split('-')[:-1])
+                    # store locations so we can reuse them when extracting text
+                    loc = path+url.split('/')[-1]
+                    # location for pulled downloadToText
+                    loc1 = path1+url.split('/')[-1]
+                    locations.append(loc1)
+                    # only download file if it doesnt exist yet
+                    if not os.path.isfile(loc):
+                        response = requests.get(url)
+                        #for files that don't exist, the longest downloaded 'pdf' i've seen is 8478 bytes - shortest existing pdf is 8879 bytes - there must be a better way to test if the file exists 
+                        if len(response.content)>8478:
+                            with open(loc, 'wb') as f:
+                                f.write(response.content)
+                                # if file is already OCR'd, just use pdftotext to pull text
+                                check_call(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
+                                with open(loc1[:-3]+'txt','r') as f:
+                                    # small files (i've seen length up to 116 bytes when read) are created when we call pdftotext on a non-OCR'd pdf
+                                    if len(f.read())<1000:
+                                        # if file is not OCR'd (older PDFs and some angled scans), convert PDFs to png (smaller and higher qual than tiff and run tesseract OCR
+                                        # specifying type grayscale breaks pytesseract for some images: 
+                                        text = extractText(loc,path)
+                                        with open(loc1[:-3]+'txt','w') as f:
+                                            f.write(text)
     return(locations)
 
 
@@ -143,9 +177,9 @@ def saveSearchResults(results,path):
                 values = results[key][docType]
                 outFile.write(key+'\t'+docType+'\t'+'\t'.join(values)+'\n')
 
-def downloadAndSearch(criteria,path,r,searchTerm,docTypes):
+def downloadAndSearch(criteria,path,r,searchTerm,docTypes,urlsToDownload):
     # download files, convert PDFs to text, create list of file locations
-    loc = downloadToText(r,path,docTypes)
+    loc = downloadToText(r,path,docTypes,urlsToDownload)
     # search downloaded and converted files, pull paragraphs containing search term
     results = search(loc,searchTerm)
     # save search results to file
@@ -383,17 +417,29 @@ def docTypeList():
             docTypes.append(docType+str(i))
     return docTypes
 
-def countDownloaded(councilPeriod):
-    countTerm = re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-Introduction)')
+# this doesnt work right; need to compare to number of bills that actually have URLS/docs
+# 57 of first 1000  results dont have any docs linked.\
+global urlsToDownload
+urlsToDownload = []
+def checkDownloaded(r,councilPeriod):
+    countTerm1= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-Introduction)')
+    countTerm2= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-Agenda)')
     # will me miss recent updates if we start with an offset?
     # offset works in blocks of 1000 records i.e. offset of 1 will start at 1001st record. 
-    offset = 0
+    urls =  {}
+    for bill in r.json():
+        if bill['DocumentUrl'].split('/')[-1][:-4] != '':
+            urls[bill['DocumentUrl'].split('/')[-1][:-4]] = bill['DocumentUrl']
     if os.path.isdir('pdfs'):
         files = os.listdir('pdfs')
-        nDownloaded = (len(countTerm.findall(' '.join(files)))-1)
-        if nDownloaded > 1000:
-            offset = floor(nDownloaded/1000)
-    return offset
+        downloaded = countTerm1.findall(' '.join(files))+countTerm2.findall(' '.join(files))
+        if all(url in downloaded for url in urls.keys()):
+            return 1
+        else:
+            toDownload = [url for url in urls.keys() if url not in downloaded]
+            for bill in toDownload:
+                urlsToDownload.append(urls[bill])
+            return 0
 
 if __name__ == '__main__':
     # base url
@@ -402,8 +448,13 @@ if __name__ == '__main__':
     print(criteria)
     # there seems to be a hard limit of 1000 on the number of search results returned - maybe David can talk to them about raising it
     # we can count the number of documents with both [Letters]21 and Introduction in their name to determine the row offset parameter, so we don't have to check that we downloaded everything
-    if criteria['CouncilPeriod']:
-        offset = countDownloaded(criteria['CouncilPeriod'])
+    # if i want to download more than 1000 in a run i need to make this a loop
+    offset = 0
     r = requests.post(base+'/api/v1/Legislation/AdvancedSearch/1000/'+str(offset),json=criteria)
+    if criteria['CouncilPeriod']:
+        # can only check 1000 bills at once
+        while checkDownloaded(r,criteria['CouncilPeriod']):
+            offset+=1
+            r = requests.post(base+'/api/v1/Legislation/AdvancedSearch/1000/'+str(offset),json=criteria)
     docTypes = docTypeList()
-    downloadAndSearch(criteria,path,r,searchTerm,docTypes)  
+    downloadAndSearch(criteria,path,r,searchTerm,docTypes,urlsToDownload)  
