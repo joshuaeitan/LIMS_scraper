@@ -1,7 +1,7 @@
 import requests
 import re
 import json 
-from subprocess import PIPE, check_call
+from subprocess import PIPE, run,check_call, CalledProcessError
 from unipath import Path
 import os.path
 import pytesseract
@@ -12,6 +12,17 @@ import inquirer
 import datetime
 from math import floor
 
+# get memorandum doctype: http://lims.dccouncil.us/Download/30232/PR20-0142_Memorandum.pdf
+# RC20-0039 has some kind of corruption in the PDF - repaired with ghostscript and then manually extracted text: 
+# https://superuser.com/questions/278562/how-can-i-fix-repair-a-corrupted-pdf-file/282056#282056
+# gs \
+#   -o repaired.pdf \
+#   -sDEVICE=pdfwrite \
+#   -dPDFSETTINGS=/prepress \
+#    corrupted.pdf
+##Get pr20-0142-ENROLLMENT by hand
+# need to go through and make sure all criteria choice options work right - subcategoryId = 0 doesn't seem to work when a category is selected
+# need to make sure there arent other criteria that use DisplayOrder instead of ID to search
 def convertToRegex(searchTerm):
     words = searchTerm.split(' ')
     regExTerm = '(?i)'
@@ -60,11 +71,14 @@ def downloadToText(r,path,docTypes,urlsToDownload=None):
                 if not os.path.isfile(loc):
                     response = requests.get(url)
                     #for files that don't exist, the longest downloaded 'pdf' i've seen is 8478 bytes - shortest existing pdf is 8879 bytes - there must be a better way to test if the file exists 
-                    if len(response.content)>8478:
+                    # shortest existing PDF is 8474 bytes (PR20-0142-INTRODUCTION)
+                    # for PR20-0142, the ENROLLMENT is located in a different folder than the INTRODUCTION (Download/15219/, Download/30232/)
+                    # People at LIMS think this is a fluke, due to transitioning to a new system during council period 20
+                    if len(response.content)>8473:
                         with open(loc, 'wb') as f:
                             f.write(response.content)
                             # if file is already OCR'd, just use pdftotext to pull text
-                            check_call(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
+                            run(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
                             with open(loc1[:-3]+'txt','r') as f:
                                 # small files (i've seen length up to 116 bytes when read) are created when we call pdftotext on a non-OCR'd pdf
                                 if len(f.read())<1000:
@@ -99,11 +113,11 @@ def downloadToText(r,path,docTypes,urlsToDownload=None):
                     if not os.path.isfile(loc):
                         response = requests.get(url)
                         #for files that don't exist, the longest downloaded 'pdf' i've seen is 8478 bytes - shortest existing pdf is 8879 bytes - there must be a better way to test if the file exists 
-                        if len(response.content)>8478:
+                        if len(response.content)>8500:
                             with open(loc, 'wb') as f:
                                 f.write(response.content)
                                 # if file is already OCR'd, just use pdftotext to pull text
-                                check_call(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
+                                run(['pdftotext', '-enc', 'UTF-8','-layout' , loc,loc1[:-3]+'txt'], stdout=PIPE)
                                 with open(loc1[:-3]+'txt','r') as f:
                                     # small files (i've seen length up to 116 bytes when read) are created when we call pdftotext on a non-OCR'd pdf
                                     if len(f.read())<1000:
@@ -123,6 +137,7 @@ def convertColor(imageLocation,i):
     params = ['convert', '-density','300', '-units','PixelsPerInch', imageLocation+str([i]), imageLocation[:-4]+'-'+str([i])+'.png']
     check_call(params)
 
+# This doesn't deal with encrypted PDFs (why are there encrypted docs?) - if there turns out to be more than just the oen I will have to figure something out
 def extractText(imageLocation,path):
    # converting to png outputs one file for each page, with -1,-2,...-n.png extensions - need a way to determine how many files are created
     text = ''
@@ -134,7 +149,7 @@ def extractText(imageLocation,path):
         except:
             convertColor(imageLocation,i)
             text+=pytesseract.image_to_string(Image.open(imageLocation[:-4]+'-'+str([i])+'.png'))
-        # delete pngs after text extraction: they are pretty large
+    # delete pngs after text extraction: they are pretty large
     for file in glob.glob(os.path.join(path, imageLocation.split('/')[-1][:-4]+'-*.png')):
         os.remove(file)
     return(text)
@@ -219,7 +234,7 @@ def getSearchCriteria():
 
     subcatIdLookup = {}
     for i in subcategories:
-        subcatIdLookup[i['LegislationType']] = i['Id']
+        subcatIdLookup[i['LegislationType']] = i['DisplayOrder']
 
     for i in range(len(subcategories)):
         legislationSubcategories[categoryIdLookup[subcategories[i]['LegislationCategory']]].append(subcategories[i]['LegislationType'])
@@ -327,7 +342,7 @@ def getSearchCriteria():
     statusIdLookup = {}
     for i in range(len(statuses)):
         LegislationStatuses.append(statuses[i]['Name'])
-        statusIdLookup[statuses[i]['Name']] = statuses[i]["Id"]
+        statusIdLookup[statuses[i]['Name']] = statuses[i]["DisplayOrder"]
 
 
     legislationStatus=inquirer.prompt([inquirer.List('LegislationStatus',
@@ -405,7 +420,7 @@ def getSearchCriteria():
 
 def docTypeList():
     # once we know this part is pulling every doc, we only need to check for the existence of the introduction
-    docTypes = ['SignedAct','Engrossment','Enrollment','CommitteeReport']
+    docTypes = ['SignedAct','Engrossment','Enrollment','CommitteeReport','ENROLLMENT']
     # special case: how many are like this: http://lims.dccouncil.us/Download/36248/B21-0837-Amendments11.pdf
     # amendments go up to 17 (seems like they are numbered wrong for b21-0415, and cmmittee reports go up to 12 (also seems numbered wrong for b20-0198))
     for i in range(1,13):
@@ -419,11 +434,13 @@ def docTypeList():
 
 # this doesnt work right; need to compare to number of bills that actually have URLS/docs
 # 57 of first 1000  results dont have any docs linked.\
+
 global urlsToDownload
 urlsToDownload = []
+# this only checks for introductions and agendas, will miss other files if we have the introduction but nothing else
 def checkDownloaded(r,councilPeriod):
-    countTerm1= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-Introduction)')
-    countTerm2= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-Agenda)')
+    countTerm1= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-(?i)Introduction)')
+    countTerm2= re.compile('([A-Z]+'+str(councilPeriod)+'-\d*-(?i)Agenda)')
     # will me miss recent updates if we start with an offset?
     # offset works in blocks of 1000 records i.e. offset of 1 will start at 1001st record. 
     urls =  {}
@@ -452,7 +469,8 @@ if __name__ == '__main__':
     offset = 0
     r = requests.post(base+'/api/v1/Legislation/AdvancedSearch/1000/'+str(offset),json=criteria)
     if criteria['CouncilPeriod']:
-        # can only check 1000 bills at once
+    # can only check 1000 bills at once
+    # need to add a cutoff to incrementing offset - otherwise runs forever when there are no docs left
         while checkDownloaded(r,criteria['CouncilPeriod']):
             offset+=1
             r = requests.post(base+'/api/v1/Legislation/AdvancedSearch/1000/'+str(offset),json=criteria)
